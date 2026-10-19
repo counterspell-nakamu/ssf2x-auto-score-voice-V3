@@ -29,6 +29,8 @@ OBS_PASSWORD = "123456"  # ご自身のパスワードに合わせて変更し�
 REPLAY_DIR = r"C:\Users\count\Videos"
 # ★ OBS側で設定しているメディアソースの名前 ★
 MEDIA_SOURCE_NAME = "リプレイ動画"
+# ★ リプレイ用シーンの名前（既存の「リプレイ」シーンを使用） ★
+REPLAY_SCENE_NAME = "リプレイ"
 
 # ★ マルチスケール検索の設定 ★
 SCALE_MIN = 0.5
@@ -39,7 +41,7 @@ SCALE_STEP = 0.1
 RANDOM_PHRASES = [
     "まぁかくりつだからねー！",
     "スタブおおふな！",
-    "しょけんはまけねーよーっ！",
+    "しょけんはまけねーよーッ！",
     "いいでしょう！",
     "マジやべーっす！",
     "わざがでない！",
@@ -126,7 +128,7 @@ def clean_old_replays(keep_count=5):
         print(f"[自動お掃除エラー] ファイル削除失敗: {e}")
 
 def trigger_replay_sequence():
-    """最新のリプレイファイルを自動取得してOBSにセットし、再生・シーン復帰を行う一連の処理"""
+    """最新のリプレイファイルを自動取得してOBSにセットし、シーン切り替え・復帰を行う一連の処理"""
     req_client = None
     original_scene = None
     try:
@@ -160,9 +162,9 @@ def trigger_replay_sequence():
             overlay=True
         )
 
-        # 6. リプレイシーンへ切り替え
-        print("[OBS連携] リプレイシーンへ切り替えます！")
-        req_client.set_current_program_scene("リプレイ")
+        # 6. リプレイシーンへ切り替え（OBS側で設定したカラーフィルターやテロップが適用される）
+        print(f"[OBS連携] リプレイシーン ({REPLAY_SCENE_NAME}) へ切り替えます！")
+        req_client.set_current_program_scene(REPLAY_SCENE_NAME)
 
         # 7. リプレイ再生時間（9秒）
         print("[OBS連携] リプレイ再生中...")
@@ -403,13 +405,12 @@ def main():
                         p2_active = False
 
                     if winner_detected:
-                        # ★ 1. 最優先でリプレイ保存＆再生命令を飛ばす（タイマーラグをゼロにする）★
-                        print("[情報] 勝利検知！直ちにリプレイ保存を開始します...")
+                        print("[情報] 勝利検知！読み上げとリプレイ処理を同時に開始します...")
                         
-                        # ★ 2. 音声アナウンス（リプレイの開始と並行して喋らせる）★
+                        # ★ 1. 先に音声アナウンス（読み上げ）を開始 ★
                         announce_reach_or_win(winner_name_tmp, winner_wins_tmp, loser_wins_tmp, p1_wins, p2_wins, TARGET_NUM, GAME_MODE)
 
-                        # ★ 3. リプレイ画面の管理を実行 ★
+                        # ★ 2. 同時にリプレイ保存＆再生処理を実行 ★
                         trigger_replay_sequence()
 
                     if winner_detected and GAME_MODE == "FIRST_TO" and (p1_wins >= TARGET_NUM or p2_wins >= TARGET_NUM):
