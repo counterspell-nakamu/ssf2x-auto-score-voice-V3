@@ -95,8 +95,7 @@ HIGHLIGHT_PHRASES = {
         "あぶないところで{勝者}がたえた！",
     ],
     "reach_made": [
-        "{勝者}リーチのいっぱつ！",
-        "{勝者}がリーチにのった！",
+        "{勝者}がリーチをかけた！",  # ★ 「がリーチをかけた！」に統一・修正
     ],
     "one_sided": [
         "{勝者}がおしきった！",
@@ -116,8 +115,8 @@ SCALE_MIN = 0.5
 SCALE_MAX = 1.1
 SCALE_STEP = 0.1
 
-# ランダムお遊びセリフ
-RANDOM_PHRASES = [
+# おまけセリフ（毎回付与、上から順に出現率が高く1番目が10番目の約2倍）
+EXTRA_PHRASES = [
     "おっかねー！",
     "くわれた！",
     "バカだなー！",
@@ -130,20 +129,30 @@ RANDOM_PHRASES = [
     "たのむ！",
     "だいたいわかった！"
 ]
+EXTRA_WEIGHTS = [20 - i for i in range(len(EXTRA_PHRASES))]
 
 # ==========================================
 # --- 初期状態 ---
 # ==========================================
-TARGET_NUM = 10        # 初期ルール（10先）
-GAME_MODE = "FIRST_TO" # "FIRST_TO" (先取) または "TOTAL_GAMES" (本勝負)
-P1_NAME = "1P"         # 初期プレイヤー名
-P2_NAME = "2P"
-DISABLE_RANDOM = False # ランダムセリフ無効化フラグ
+target_num = 10        # 初期ルール（10先）
+game_mode = "FIRST_TO" # "FIRST_TO" (先取) または "TOTAL_GAMES" (本勝負)
+p1_name = "1P"         # 初期プレイヤー名
+p2_name = "2P"
+disable_extra = False  # おまけセリフ無効化フラグ
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-template_path = os.path.join(BASE_DIR, 'stars2.png')
-set_score_path = os.path.join(BASE_DIR, 'set_score.txt')
-scores_path = os.path.join(BASE_DIR, 'scores.txt')
+base_dir = os.path.dirname(os.path.abspath(__file__))
+template_path = os.path.join(base_dir, 'stars2.png')
+set_score_path = os.path.join(base_dir, 'set_score.txt')
+scores_path = os.path.join(base_dir, 'scores.txt')
+subtitle_path = os.path.join(base_dir, 'subtitle.txt') # ★ 字幕ファイル用パス追加
+
+def update_subtitle(text):
+    """字幕用テキストファイルを更新する関数"""
+    try:
+        with open(subtitle_path, 'w', encoding='utf-8') as f:
+            f.write(text)
+    except Exception as e:
+        print(f"字幕更新エラー: {e}")
 
 def imread_japanese(filepath, flags=cv2.IMREAD_COLOR):
     """日本語パスでも安全に画像を読み込む関数"""
@@ -188,7 +197,11 @@ def _synthesize_to_file(text, wav_path):
 def _speak_now(text):
     """VOICEVOXで音声を作って、再生が終わるまで待つ（裏スレッド専用）"""
     print(f"[ずんだもん発話] {text}")
-    temp_wave_path = os.path.join(BASE_DIR, "temp_voice.wav")
+    
+    # ★ 発話と同時に subtitle.txt を自動更新
+    update_subtitle(text)
+    
+    temp_wave_path = os.path.join(base_dir, "temp_voice.wav")
     if _synthesize_to_file(text, temp_wave_path):
         # 同期再生（再生が終わるまでこのスレッドで待つ。メイン処理は止まらない）
         winsound.PlaySound(temp_wave_path, winsound.SND_FILENAME)
@@ -204,20 +217,21 @@ def _voice_worker():
         finally:
             _voice_queue.task_done()
 
-def speak_zundamon(text, allow_random=False):
+def speak_zundamon(text, allow_extra=False):
     """読み上げをキューに入れる（すぐに戻る。実際の発話は裏スレッドが順番に行う）"""
     if not text:
         return
 
-    if allow_random and not DISABLE_RANDOM and random.randint(1, 1) == 1:
-        extra = random.choice(RANDOM_PHRASES)
+    # 毎回必ずおまけセリフをウェイト付きで追加する
+    if allow_extra and not disable_extra:
+        extra = random.choices(EXTRA_PHRASES, weights=EXTRA_WEIGHTS, k=1)[0]
         text = f"{text} {extra}"
 
     _voice_queue.put(text)
 
 def prepare_voice(text, key):
     """ハイライト用：音声を先に作っておく（再生はしない）。作れなければNone"""
-    path = os.path.join(BASE_DIR, f"hl_voice_{key}.wav")
+    path = os.path.join(base_dir, f"hl_voice_{key}.wav")
     try:
         print(f"[ずんだもん発話(準備)] {text}")
         if _synthesize_to_file(text, path):
@@ -235,6 +249,14 @@ def play_voice_file(path):
     except Exception as e:
         print(f"音声再生エラー: {e}")
 
+def play_voice_file_async(path):
+    """準備済みの音声を裏スレッドで流す（映像の再生と同時進行にするため）。スレッドを返す（音声がなければNone）"""
+    if not path:
+        return None
+    t = threading.Thread(target=play_voice_file, args=(path,), daemon=True)
+    t.start()
+    return t
+
 # ==========================================
 # --- ハイライト用クリップの記録 ---
 # ==========================================
@@ -242,20 +264,20 @@ set_clips = []   # 今のセットで溜めているクリップ情報
 _clip_seq = 0    # クリップの記録順（試合の順番）
 
 def classify_game(winner_wins, loser_wins):
-    """勝利後のスコアから、その試合の山場の種類を決める（先取りモード用）"""
-    target = TARGET_NUM
+    """勝利後のスコアから、その試合の山場の種類を決める（先取り専用の山場は先取りモードのときだけ判定）"""
+    target = target_num
     prev_winner = winner_wins - 1
     prev_loser = loser_wins
 
-    if winner_wins >= target:
+    if game_mode == "FIRST_TO" and winner_wins >= target:
         return "final"
-    if winner_wins == target - 1 and loser_wins == target - 1:
+    if game_mode == "FIRST_TO" and winner_wins == target - 1 and loser_wins == target - 1:
         return "double_reach"
     if prev_winner < prev_loser and winner_wins >= loser_wins:
         return "comeback_lead" if winner_wins > loser_wins else "comeback_tie"
-    if loser_wins == target - 1 and winner_wins < target - 1:
+    if game_mode == "FIRST_TO" and loser_wins == target - 1 and winner_wins < target - 1:
         return "reach_block"
-    if winner_wins == target - 1:
+    if game_mode == "FIRST_TO" and winner_wins == target - 1:
         return "reach_made"
     if winner_wins - loser_wins >= ONE_SIDED_DIFF:
         return "one_sided"
@@ -315,7 +337,7 @@ def build_intro_text(index, clip, used_phrases):
     """ハイライト1本ごとの紹介セリフを作る（同じ種類でも違うセリフを優先）"""
     variants = HIGHLIGHT_PHRASES.get(clip["kind"], HIGHLIGHT_PHRASES["normal"])
     candidates = [v for v in variants if v not in used_phrases] or list(variants)
-    phrase = candidates[0] if DISABLE_RANDOM else random.choice(candidates)
+    phrase = candidates[0] if disable_extra else random.choice(candidates)
     used_phrases.add(phrase)
 
     if index < len(HIGHLIGHT_ORDINALS):
@@ -648,7 +670,7 @@ def play_instant_replay(t0, latest_replay, duration):
                 drop_obs_client()
 
 def run_highlights(t0):
-    """セット決着後のハイライト：山場のクリップを選び、紹介セリフ→映像 の順で続けて再生する。再生できたらTrue"""
+    """セット決着後のハイライト：山場のクリップを選び、開きのセリフ→（紹介セリフと映像を同時に）の順で再生する。再生できたらTrue"""
     clips = select_highlights()
     if not clips:
         print("[ハイライト] 再生できるクリップがありません。")
@@ -666,7 +688,7 @@ def run_highlights(t0):
         0: prepare_voice(intros[0], "intro0"),
     }
 
-    # ★ 自動でハイライトを始めるまでの待ち時間（段階3で手動選択に差し替える場所） ★
+    # ★ 自動でハイライトを始めるまでの待ち時間 ★
     remaining = (t0 + HIGHLIGHT_START_DELAY) - time.time()
     if remaining > 0:
         print(f"[ハイライト] {remaining:.1f}秒後にハイライトを開始します...")
@@ -678,6 +700,7 @@ def run_highlights(t0):
     original_scene = None
     switched = False
     played = 0
+    voice_thread = None
 
     try:
         original_scene = client.get_current_program_scene().current_program_scene_name
@@ -686,14 +709,11 @@ def run_highlights(t0):
             print(f"[OBS連携] 検知時にリプレイシーンのままでした。終了後は ({ORIGINAL_SCENE_NAME}) へ戻します。")
             original_scene = ORIGINAL_SCENE_NAME
 
-        # 開きのセリフ ＋ 1本目の紹介（元のシーンのまま話す）
+        # 開きのセリフ（字幕を更新してから再生）
+        update_subtitle(HIGHLIGHT_OPENING)
         play_voice_file(voices.get("opening"))
-        play_voice_file(voices.get(0))
 
         for i, clip in enumerate(clips):
-            if i > 0:
-                play_voice_file(voices.get(i))  # 前のクリップ再生中に準備しておいた紹介
-
             client.set_input_settings(
                 name=MEDIA_SOURCE_NAME,
                 settings={"local_file": clip["path"]},
@@ -704,6 +724,10 @@ def run_highlights(t0):
                 print(f"[OBS連携] リプレイシーン ({REPLAY_SCENE_NAME}) へ切り替えます！")
                 switched = True
                 client.set_current_program_scene(REPLAY_SCENE_NAME)
+
+            # 紹介セリフ（字幕を更新して、映像と同時に音声を流し始める。音声は裏スレッドで再生）
+            update_subtitle(intros[i])
+            voice_thread = play_voice_file_async(voices.get(i))  # 前のクリップ再生中に準備しておいた紹介
 
             t_start = time.time()
             duration = clip.get("duration")
@@ -725,6 +749,10 @@ def run_highlights(t0):
             if remaining > 0:
                 time.sleep(remaining)
 
+            # 紹介セリフがまだ続いていれば、終わるまで待ってから次のクリップへ
+            if voice_thread is not None:
+                voice_thread.join()
+
     except Exception as e:
         print(f"[OBS連携エラー] ハイライト再生に失敗しました: {e}")
         drop_obs_client()
@@ -740,8 +768,13 @@ def run_highlights(t0):
                 print(f"[OBS連携復帰エラー] 元のシーンに戻せませんでした: {e}")
                 drop_obs_client()
 
+    if voice_thread is not None:
+        voice_thread.join()  # 紹介セリフが再生中なら終わるまで待つ（終了セリフと重ならないように）
+
     if played > 0:
-        speak_zundamon(HIGHLIGHT_CLOSING, allow_random=False)
+        # ハイライト終了のセリフ（字幕を更新）
+        update_subtitle(HIGHLIGHT_CLOSING)
+        speak_zundamon(HIGHLIGHT_CLOSING, allow_extra=False)
     return played > 0
 
 # ==========================================
@@ -755,9 +788,15 @@ def create_initial_files():
         with open(scores_path, 'w', encoding='utf-8') as f:
             f.write("(10先) 1P 0-0 2P")
 
-def update_score_display(p1_wins, p2_wins, target, mode, p1_name, p2_name):
-    mode_text = f"{target}先" if mode == "FIRST_TO" else f"全{target}本"
-    text = f"({mode_text}) {p1_name} {p1_wins}-{p2_wins} {p2_name}"
+def is_set_over(p1_w_val, p2_w_val):
+    """セット決着かどうか：先取りモード＝どちらかが目標数に到達 / 本勝負モード＝合計試合数が目標数に到達"""
+    if game_mode == "FIRST_TO":
+        return p1_w_val >= target_num or p2_w_val >= target_num
+    return p1_w_val + p2_w_val >= target_num
+
+def update_score_display(p1_w_val, p2_w_val, target_val, mode_val, p1_n_val, p2_n_val):
+    mode_text = f"{target_val}先" if mode_val == "FIRST_TO" else f"全{target_val}本"
+    text = f"({mode_text}) {p1_n_val} {p1_w_val}-{p2_w_val} {p2_n_val}"
     with open(scores_path, 'w', encoding='utf-8') as f:
         f.write(text)
 
@@ -774,18 +813,22 @@ def extract_star_and_frame(img):
     return cv2.bitwise_or(mask_yellow, mask_white)
 
 def parse_set_score_content(content):
-    global TARGET_NUM, GAME_MODE, P1_NAME, P2_NAME, DISABLE_RANDOM
+    global target_num, game_mode, p1_name, p2_name, disable_extra
     lines = content.splitlines()
     
-    p1_w, p2_w = None, None
+    p1_w = None
+    p2_w = None
     reset_flag = False
-    name_changed = False
-    rule_changed = False
 
     if any(k in content for k in ["ランダムなし", "ランダムオフ", "no_random", "norandom"]):
-        DISABLE_RANDOM = True
+        disable_extra = True
     else:
-        DISABLE_RANDOM = False
+        disable_extra = False
+
+    new_p1 = p1_name
+    new_p2 = p2_name
+    new_target = target_num
+    new_mode = game_mode
 
     for line in lines:
         line = line.strip()
@@ -793,38 +836,29 @@ def parse_set_score_content(content):
             continue
             
         if "," in line or "1P:" in line or "2P:" in line:
-            old_p1, old_p2 = P1_NAME, P2_NAME
             if "1P:" in line and "2P:" in line:
                 parts = line.split(",")
                 for p in parts:
                     if "1P:" in p:
-                        P1_NAME = p.replace("1P:", "").strip()
+                        new_p1 = p.replace("1P:", "").strip()
                     elif "2P:" in p:
-                        P2_NAME = p.replace("2P:", "").strip()
+                        new_p2 = p.replace("2P:", "").strip()
             elif "," in line:
                 parts = line.split(",")
                 if len(parts) >= 2:
-                    P1_NAME = parts[0].strip()
-                    P2_NAME = parts[1].strip()
-            if old_p1 != P1_NAME or old_p2 != P2_NAME:
-                name_changed = True
+                    new_p1 = parts[0].strip()
+                    new_p2 = parts[1].strip()
 
         elif "先" in line:
             num_str = "".join(filter(str.isdigit, line))
             if num_str:
                 new_target = int(num_str)
-                if TARGET_NUM != new_target or GAME_MODE == "FIRST_TO":
-                    TARGET_NUM = new_target
-                    GAME_MODE = "FIRST_TO"
-                    rule_changed = True
+                new_mode = "FIRST_TO"
         elif "本" in line:
             num_str = "".join(filter(str.isdigit, line))
             if num_str:
                 new_target = int(num_str)
-                if TARGET_NUM != new_target or GAME_MODE == "TOTAL_GAMES":
-                    TARGET_NUM = new_target
-                    GAME_MODE = "TOTAL_GAMES"
-                    rule_changed = True
+                new_mode = "TOTAL_GAMES"
 
         elif line.lower() == "reset" or line == "0-0":
             reset_flag = True
@@ -834,21 +868,33 @@ def parse_set_score_content(content):
                 p1_w = int(parts[0].strip())
                 p2_w = int(parts[1].strip())
 
+    # 実際に値が変わったときだけフラグを立てる（厳密な変更判定）
+    name_changed = (new_p1 != p1_name or new_p2 != p2_name)
+    rule_changed = (new_target != target_num or new_mode != game_mode)
+
+    if name_changed:
+        p1_name = new_p1
+        p2_name = new_p2
+
+    if rule_changed:
+        target_num = new_target
+        game_mode = new_mode
+
     return p1_w, p2_w, reset_flag, name_changed, rule_changed
 
-def announce_reach_or_win(winner_name, winner_wins, loser_wins, p1_wins, p2_wins, target_num, game_mode):
-    if game_mode == "FIRST_TO" and winner_wins >= target_num:
-        speak_zundamon(f"{winner_name}しょうり！ {p1_wins}対{p2_wins}でしょうしゃは{winner_name}！おめでとう、よいしょうぶだった！", allow_random=False)
-    elif game_mode == "FIRST_TO" and winner_wins == target_num - 1:
-        if loser_wins == target_num - 1:
-            speak_zundamon(f"{winner_name}しょうり、{p1_wins}ー{p2_wins}、{winner_name}おっかけリーチ！", allow_random=True)
+def announce_reach_or_win(winner_name, winner_wins, loser_wins, p1_wins, p2_wins, target_val, mode_val):
+    if mode_val == "FIRST_TO" and winner_wins >= target_val:
+        speak_zundamon(f"{winner_name}しょうり！ {p1_wins}対{p2_wins}でしょうしゃは{winner_name}！おめでとう、よいしょうぶだった！", allow_extra=False)
+    elif mode_val == "FIRST_TO" and winner_wins == target_val - 1:
+        if loser_wins == target_val - 1:
+            speak_zundamon(f"{winner_name}しょうり、{p1_wins}ー{p2_wins}、{winner_name}おっかけリーチ！", allow_extra=True)
         else:
-            speak_zundamon(f"{winner_name}しょうり、{p1_wins}ー{p2_wins}、{winner_name}リーチ！", allow_random=True)
+            speak_zundamon(f"{winner_name}しょうり、{p1_wins}ー{p2_wins}、{winner_name}リーチ！", allow_extra=True)
     else:
-        speak_zundamon(f"{winner_name}しょうり、{p1_wins}ー{p2_wins}！", allow_random=True)
+        speak_zundamon(f"{winner_name}しょうり、{p1_wins}ー{p2_wins}！", allow_extra=True)
 
 def main():
-    global TARGET_NUM, GAME_MODE, P1_NAME, P2_NAME
+    global target_num, game_mode, p1_name, p2_name
     create_initial_files()
     
     print("★ 実況システム起動 (ずんだもん・ハイライト対応版)...\n")
@@ -875,7 +921,7 @@ def main():
     last_detected_time = 0.0
     last_set_score_mtime = os.path.getmtime(set_score_path) if os.path.exists(set_score_path) else 0
     
-    update_score_display(p1_wins, p2_wins, TARGET_NUM, GAME_MODE, P1_NAME, P2_NAME)
+    update_score_display(p1_wins, p2_wins, target_num, game_mode, p1_name, p2_name)
 
     with MSS() as sct:
         monitors = sct.monitors
@@ -894,22 +940,22 @@ def main():
                                 content = f.read().strip()
                             
                             p1_w, p2_w, reset_flag, name_changed, rule_changed = parse_set_score_content(content)
-                            mode_str = f"{TARGET_NUM}先" if GAME_MODE == "FIRST_TO" else f"全{TARGET_NUM}本"
+                            mode_str = f"{target_num}先" if game_mode == "FIRST_TO" else f"全{target_num}本"
                             
                             if reset_flag:
                                 p1_wins, p2_wins = 0, 0
                                 clear_set_clips()  # 新しいセットなので、溜めていたクリップ記録も破棄
-                                speak_zundamon(f"1P、{P1_NAME}。2P、{P2_NAME}。{mode_str}。ぜったいにまけられないたたかいがそこにはあるのだ！", allow_random=False)
+                                speak_zundamon(f"1P、{p1_name}。2P、{p2_name}。{mode_str}。ぜったいにまけられないたたかいがそこにはあるのだ！", allow_extra=False)
                             else:
                                 if p1_w is not None and p2_w is not None:
                                     p1_wins, p2_wins = p1_w, p2_w
-                                    speak_zundamon(f"スコア修正、{p1_wins}ー{p2_wins}！", allow_random=False)
+                                    speak_zundamon(f"スコア修正、{p1_wins}ー{p2_wins}！", allow_extra=False)
                                 if name_changed:
-                                    speak_zundamon(f"名前変更、{P1_NAME}対{P2_NAME}！", allow_random=False)
+                                    speak_zundamon(f"名前変更、{p1_name}対{p2_name}！", allow_extra=False)
                                 if rule_changed:
-                                    speak_zundamon(f"形式変更、{mode_str}！", allow_random=False)
+                                    speak_zundamon(f"形式変更、{mode_str}！", allow_extra=False)
 
-                            update_score_display(p1_wins, p2_wins, TARGET_NUM, GAME_MODE, P1_NAME, P2_NAME)
+                            update_score_display(p1_wins, p2_wins, target_num, game_mode, p1_name, p2_name)
                         except Exception as e:
                             print(f"ファイル読み込みエラー: {e}")
 
@@ -942,7 +988,9 @@ def main():
                     if detected_p1 or detected_p2:
                         break
 
-                match_over = (GAME_MODE == "FIRST_TO" and (p1_wins >= TARGET_NUM or p2_wins >= TARGET_NUM))
+                # 試合終了（セット決着）の判定：先取りモード or 本勝負モード（合計試合数が目標数に到達）
+                match_over = is_set_over(p1_wins, p2_wins)
+
                 current_time = time.time()
 
                 if current_time - last_detected_time > COOLDOWN_SECONDS:
@@ -954,10 +1002,10 @@ def main():
                     if detected_p1 and not p1_active and not match_over:
                         p1_wins += 1
                         last_detected_time = current_time
-                        update_score_display(p1_wins, p2_wins, TARGET_NUM, GAME_MODE, P1_NAME, P2_NAME)
+                        update_score_display(p1_wins, p2_wins, target_num, game_mode, p1_name, p2_name)
                         p1_active = True
                         winner_detected = True
-                        winner_name_tmp = P1_NAME
+                        winner_name_tmp = p1_name
                         winner_wins_tmp = p1_wins
                         loser_wins_tmp = p2_wins
                     elif not detected_p1:
@@ -966,10 +1014,10 @@ def main():
                     if detected_p2 and not p2_active and not match_over:
                         p2_wins += 1
                         last_detected_time = current_time
-                        update_score_display(p1_wins, p2_wins, TARGET_NUM, GAME_MODE, P1_NAME, P2_NAME)
+                        update_score_display(p1_wins, p2_wins, target_num, game_mode, p1_name, p2_name)
                         p2_active = True
                         winner_detected = True
-                        winner_name_tmp = P2_NAME
+                        winner_name_tmp = p2_name
                         winner_wins_tmp = p2_wins
                         loser_wins_tmp = p1_wins
                     elif not detected_p2:
@@ -980,7 +1028,8 @@ def main():
 
                     if winner_detected:
                         print("[情報] 勝利検知！リプレイ保存を最優先で実行します...")
-                        set_finished = (GAME_MODE == "FIRST_TO" and (p1_wins >= TARGET_NUM or p2_wins >= TARGET_NUM))
+                        # ★ 勝利を数えた「後」のスコアで決着を再判定する（数える前の match_over を使うと決着試合を取りこぼす） ★
+                        set_finished = is_set_over(p1_wins, p2_wins)
 
                         # ★ 1. 最優先：リプレイバッファを保存（保存のタイミングを毎回そろえる） ★
                         save_info = start_replay_save()
@@ -988,14 +1037,14 @@ def main():
                             print(f"[情報] 検知→保存要求 {save_info['client_t0'] - current_time:.2f}秒")
 
                         # ★ 2. 読み上げをキューに入れる（音声合成は裏スレッドで行うので待たない） ★
-                        announce_reach_or_win(winner_name_tmp, winner_wins_tmp, loser_wins_tmp, p1_wins, p2_wins, TARGET_NUM, GAME_MODE)
+                        announce_reach_or_win(winner_name_tmp, winner_wins_tmp, loser_wins_tmp, p1_wins, p2_wins, target_num, game_mode)
 
                         # ★ 3. 新しいファイルを確認（古いリプレイは絶対に流さない） ★
                         replay_path = secure_replay_file(save_info)
                         duration = get_clip_duration_seconds(replay_path) if replay_path else None
 
-                        # ★ 4. 先取りモードなら、ハイライト候補として記録 ★
-                        if GAME_MODE == "FIRST_TO" and replay_path:
+                        # ★ 4. ハイライト候補として記録（先取り・本勝負どちらも） ★
+                        if replay_path:
                             record_set_clip(replay_path, duration, winner_name_tmp,
                                             winner_wins_tmp, loser_wins_tmp, p1_wins, p2_wins)
 
@@ -1019,9 +1068,9 @@ def main():
                         p1_active, p2_active = False, False
                         clear_set_clips()
                         clean_old_replays()
-                        update_score_display(p1_wins, p2_wins, TARGET_NUM, GAME_MODE, P1_NAME, P2_NAME)
+                        update_score_display(p1_wins, p2_wins, target_num, game_mode, p1_name, p2_name)
                         
-                        speak_zundamon("セットカウント、リセットするのだ！", allow_random=False)
+                        speak_zundamon("セットカウント、リセットするのだ！", allow_extra=False)
                         print("[情報] スコアを 0-0 に自動リセットしました。")
                 
                 # 高速監視（0.1秒間隔）
